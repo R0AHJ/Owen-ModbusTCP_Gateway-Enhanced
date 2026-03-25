@@ -127,6 +127,10 @@ Ready examples:
 - [owen_config.linux.json](/D:/Python_Project/owen_config.linux.json)
 - [owen_config.windows.json](/D:/Python_Project/owen_config.windows.json)
 
+Project navigation:
+
+- [PROJECT_FILES.md](/D:/Python_Project/PROJECT_FILES.md)
+
 ## Install
 
 ```bash
