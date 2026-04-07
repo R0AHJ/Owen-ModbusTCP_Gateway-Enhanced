@@ -403,6 +403,35 @@ class ConfigToolsTests(unittest.TestCase):
         self.assertIn("Base address: 96", details)
         self.assertIn("| `7` | `102` | `HR28..HR29` | `HR46` | `HR68..HR69` |", details)
 
+    def test_line_commands_support_legacy_bus1_alias(self) -> None:
+        payload = load_config_document("missing-test-config.json")
+        payload["buses"] = [
+            {
+                "name": "bus1",
+                "modbus_slave_base": 10,
+                "serial": {
+                    "port": "/dev/ttyUSB0",
+                    "baudrate": 9600,
+                    "bytesize": 8,
+                    "parity": "N",
+                    "stopbits": 1,
+                    "timeout_ms": 500,
+                    "address_bits": 8,
+                },
+                "poll_interval_ms": 500,
+            }
+        ]
+        add_trm138_device(payload, line=1, base_address=96, channels=[1], tag="legacy")
+        payload["points"][0]["bus"] = "bus1"
+        payload["points"][1]["bus"] = "bus1"
+        payload["points"][2]["bus"] = "bus1"
+
+        devices = get_line_devices(payload, 1)
+        details = render_device_details(payload, line=1, base_address=96)
+
+        self.assertEqual(len(devices), 1)
+        self.assertIn("SlaveID: 96", details)
+
 
 def load_config_from_payload(payload: dict[str, object]):
     import json

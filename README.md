@@ -140,6 +140,7 @@
 
 - [PROJECT_FILES.md](/D:/Python_Project/PROJECT_FILES.md)
 - [CHANGELOG_RU.md](/D:/Python_Project/CHANGELOG_RU.md)
+- [deploy/linux/README_RU.md](/D:/Python_Project/deploy/linux/README_RU.md)
 
 ## Установка
 
@@ -172,3 +173,11 @@ python -m owen_gateway.probe --config owen_probe.com6.json --log-level INFO
 ```bash
 python -m unittest discover -s tests
 ```
+
+## Linux и автозапуск
+
+Для установки на Linux с `systemd` используй:
+
+- [deploy/linux/install.sh](/D:/Python_Project/deploy/linux/install.sh)
+- [deploy/linux/owen-gateway.service.template](/D:/Python_Project/deploy/linux/owen-gateway.service.template)
+- [deploy/linux/README_RU.md](/D:/Python_Project/deploy/linux/README_RU.md)

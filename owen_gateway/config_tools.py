@@ -84,11 +84,11 @@ def render_config_summary(payload: dict[str, object]) -> str:
 
 
 def render_line_devices(payload: dict[str, object], line: int) -> str:
-    bus_name = _line_name(line)
+    bus_name = _resolve_bus_name(payload, line)
     devices = get_line_devices(payload, line)
     if not devices:
-        return f"{bus_name}: no devices configured"
-    lines = [f"{bus_name} devices:"]
+        return f"{_line_name(line)}: no devices configured"
+    lines = [f"{_line_name(line)} devices:"]
     for index, device in enumerate(devices, start=1):
         lines.append(
             f"{index}. device={device['device']} SlaveID={device['slave_id']} "
@@ -105,7 +105,7 @@ def render_device_details(
     base_address: int | None = None,
     tag: str | None = None,
 ) -> str:
-    bus_name = _line_name(line)
+    bus_name = _resolve_bus_name(payload, line)
     grouped = get_line_devices(payload, line)
     selected = _select_collected_device(
         grouped,
@@ -132,7 +132,7 @@ def render_device_details(
 
 
 def get_line_devices(payload: dict[str, object], line: int) -> list[dict[str, object]]:
-    bus_name = _line_name(line)
+    bus_name = _resolve_bus_name(payload, line)
     return _collect_devices(payload).get(bus_name, [])
 
 
@@ -305,9 +305,9 @@ def add_trm138_device(
     tag: str | None = None,
 ) -> dict[str, int | str]:
     buses = _get_buses(payload)
-    bus_name = _line_name(line)
+    bus_name = _resolve_bus_name(payload, line)
     if not any(bus["name"] == bus_name for bus in buses):
-        raise ValueError(f"{bus_name} is not configured")
+        raise ValueError(f"{_line_name(line)} is not configured")
 
     points = _get_points(payload)
     requested_channels = sorted(set(channels))
@@ -353,7 +353,7 @@ def add_trm138_device(
 
 def remove_line(payload: dict[str, object], *, line: int) -> dict[str, int]:
     buses = _get_buses(payload)
-    bus_name = _line_name(line)
+    bus_name = _resolve_bus_name(payload, line)
     points = _get_points(payload)
     removed_points = sum(1 for point in points if point.get("bus") == bus_name)
     payload["points"] = [point for point in points if point.get("bus") != bus_name]
@@ -363,7 +363,7 @@ def remove_line(payload: dict[str, object], *, line: int) -> dict[str, int]:
         removed_buses = 1
     payload["buses"] = new_buses
     if removed_buses == 0:
-        raise ValueError(f"{bus_name} is not configured")
+        raise ValueError(f"{_line_name(line)} is not configured")
     return {"line": line, "removed_buses": removed_buses, "removed_points": removed_points}
 
 
@@ -375,7 +375,7 @@ def remove_trm138_device(
     base_address: int | None = None,
     tag: str | None = None,
 ) -> dict[str, int | str]:
-    bus_name = _line_name(line)
+    bus_name = _resolve_bus_name(payload, line)
     points = _get_points(payload)
     grouped = _group_bus_devices(points, bus_name)
     matched_device = _match_device(
@@ -410,7 +410,7 @@ def update_trm138_channels(
     base_address: int | None = None,
     tag: str | None = None,
 ) -> dict[str, int | str]:
-    bus_name = _line_name(line)
+    bus_name = _resolve_bus_name(payload, line)
     points = _get_points(payload)
     requested_channels = sorted(set(channels))
     if not requested_channels:
@@ -544,6 +544,18 @@ def _line_name(line: int) -> str:
     if not 1 <= line <= MAX_BUSES:
         raise ValueError(f"line must be in range 1..{MAX_BUSES}")
     return f"line{line}"
+
+
+def _resolve_bus_name(payload: dict[str, object], line: int) -> str:
+    canonical = _line_name(line)
+    buses = _get_buses(payload)
+    bus_names = {str(bus["name"]) for bus in buses}
+    if canonical in bus_names:
+        return canonical
+    legacy = f"bus{line}"
+    if legacy in bus_names:
+        return legacy
+    return canonical
 
 
 def _next_device_number(devices: list[int]) -> int:

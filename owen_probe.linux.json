@@ -1,0 +1,20 @@
+{
+  "serial": {
+    "port": "/dev/serial/by-id/usb-WCH.CN_USB_Quad_Serial_BCD91DABCD-if00",
+    "baudrate": 9600,
+    "bytesize": 8,
+    "parity": "N",
+    "stopbits": 1,
+    "timeout_ms": 500,
+    "address_bits": 8
+  },
+  "request": {
+    "address": 96,
+    "parameter": "rEAd",
+    "protocol_format": "float32"
+  },
+  "retries": 1,
+  "inter_request_delay_ms": 15,
+  "poll_interval_ms": 1000,
+  "cycles": 3
+}

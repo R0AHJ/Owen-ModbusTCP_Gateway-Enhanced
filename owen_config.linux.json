@@ -4,7 +4,7 @@
       "name": "bus1",
       "modbus_slave_base": 10,
       "serial": {
-        "port": "/dev/ttyUSB0",
+        "port": "/dev/serial/by-id/usb-WCH.CN_USB_Quad_Serial_BCD91DABCD-if00",
         "baudrate": 9600,
         "bytesize": 8,
         "parity": "N",

@@ -1,0 +1,19 @@
+[Unit]
+Description=OVEN RS-485 to Modbus TCP gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+WorkingDirectory=@APP_DIR@
+Environment=PYTHONPATH=@APP_DIR@
+ExecStart=@APP_DIR@/.venv/bin/python -m owen_gateway --config @CONFIG_DIR@/owen_config.json --log-level INFO
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
