@@ -18,6 +18,9 @@
 - декодирование параметров `TRM138`: `C.SP`, `HYSt`, `AL.t`
 - запись `C.SP` через Modbus с последующей проверкой обратным чтением
 - расчет маски состояния логических устройств в `HR48`
+- изолированная обработка ошибок (сбой одного канала/прибора не прерывает опрос остальных)
+- автоматическое восстановление соединения при обрыве линии
+- расширенное логирование ошибок с контекстом
 
 ## Модель работы
 
@@ -43,6 +46,7 @@
 - `2` degraded
 - `3` offline
 - `4` protocol error
+- `5` disconnected (обрыв линии)
 
 Коды последних ошибок:
 
@@ -52,6 +56,11 @@
 - `3` hash mismatch
 - `4` decode error
 - `5` io error
+- `6` serial init error
+- `7` serial write error
+- `8` serial read error
+- `9` serial disconnected
+- `10` device unreachable
 
 ## Карта TRM138
 
@@ -69,6 +78,7 @@
 - `2` temporary communication error
 - `3` protocol error
 - `4` failed, reduced polling
+- `5` reconnecting
 
 `HR48` содержит битовую маску:
 
@@ -128,19 +138,20 @@
 
 Если в старом конфиге присутствует `stale_after_cycles`, он игнорируется.
 
-Готовые примеры:
+Готовые примеры конфигураций:
 
-- [owen_config.single_trm138.com6.json](/D:/Python_Project/owen_config.single_trm138.com6.json)
-- [owen_config.example.json](/D:/Python_Project/owen_config.example.json)
-- [owen_config.com6.two_trm138.addr48_96.json](/D:/Python_Project/owen_config.com6.two_trm138.addr48_96.json)
-- [owen_config.linux.json](/D:/Python_Project/owen_config.linux.json)
-- [owen_config.windows.json](/D:/Python_Project/owen_config.windows.json)
+- `owen_config.example.json` - базовый пример
+- `owen_config.single_trm138.com6.json` - один TRM138 на Windows COM6
+- `owen_config.com6.two_trm138.addr48_96.json` - два TRM138 на адресах 48 и 96
+- `owen_config.linux.json` - конфигурация для Linux
+- `owen_config.windows.json` - конфигурация для Windows
 
-Навигация по проекту:
+## Навигация по проекту
 
-- [PROJECT_FILES.md](/D:/Python_Project/PROJECT_FILES.md)
-- [CHANGELOG_RU.md](/D:/Python_Project/CHANGELOG_RU.md)
-- [deploy/linux/README_RU.md](/D:/Python_Project/deploy/linux/README_RU.md)
+- [PROJECT_FILES.md](PROJECT_FILES.md) - структура проекта
+- [CHANGELOG_RU.md](CHANGELOG_RU.md) - история изменений
+- [OWEN_GATEWAY_GUIDE_RU.md](OWEN_GATEWAY_GUIDE_RU.md) - подробное руководство
+- [deploy/linux/README_RU.md](deploy/linux/README_RU.md) - установка на Linux с systemd
 
 ## Установка
 
@@ -174,10 +185,60 @@ python -m owen_gateway.probe --config owen_probe.com6.json --log-level INFO
 python -m unittest discover -s tests
 ```
 
+## Утилиты конфигурации
+
+Интерактивное меню управления конфигурацией:
+
+```bash
+python -m owen_gateway config menu
+```
+
+Список доступных команд:
+
+```bash
+# Показать сводку конфигурации
+python -m owen_gateway config list-config
+
+# Добавить линию
+python -m owen_gateway config set-line --line 1 --port COM6 --baudrate 9600
+
+# Добавить TRM138
+python -m owen_gateway config add-trm138 --line 1 --base-address 48 --channels 1-8
+
+# Экспортировать конфигурацию
+python -m owen_gateway config export-config --output backup_config.json
+```
+
 ## Linux и автозапуск
 
 Для установки на Linux с `systemd` используй:
 
-- [deploy/linux/install.sh](/D:/Python_Project/deploy/linux/install.sh)
-- [deploy/linux/owen-gateway.service.template](/D:/Python_Project/deploy/linux/owen-gateway.service.template)
-- [deploy/linux/README_RU.md](/D:/Python_Project/deploy/linux/README_RU.md)
+- [deploy/linux/install.sh](deploy/linux/install.sh)
+- [deploy/linux/owen-gateway.service.template](deploy/linux/owen-gateway.service.template)
+- [deploy/linux/README_RU.md](deploy/linux/README_RU.md)
+
+Bash-меню для управления шлюзом на Linux:
+
+```bash
+./deploy/linux/owen-gateway.sh
+```
+
+## Обработка ошибок
+
+Шлюз устойчив к сбоям оборудования:
+
+- **Изоляция каналов**: ошибка в одном канале не прерывает опрос остальных
+- **Изоляция приборов**: сбой одного прибора не влияет на другие приборы на той же линии
+- **Автоматическое восстановление**: при обрыве линии шлюз автоматически
+  переподключается и продолжает работу
+- **Статус обрыва**: при физическом обрыве линии регистр статуса линии (HR10/HR11)
+  показывает `5` (disconnected)
+- **Расширенное логирование**: все ошибки логируются с полным контекстом (bus, slave_id,
+  point name, address, parameter)
+
+Уровни логирования:
+
+- `DEBUG` - подробная диагностика обмена данными
+- `INFO` - операционные сообщения
+- `WARNING` - временные сбои (таймауты)
+- `ERROR` - протокольные ошибки и сбои оборудования

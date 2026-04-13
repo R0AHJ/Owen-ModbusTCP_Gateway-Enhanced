@@ -20,6 +20,8 @@ STATUS_OK = 1
 STATUS_DEGRADED = 2
 STATUS_OFFLINE = 3
 STATUS_PROTOCOL_ERROR = 4
+STATUS_CONNECTING = 0
+STATUS_DISCONNECTED = 5
 
 ERROR_NONE = 0
 ERROR_TIMEOUT = 1
@@ -27,12 +29,18 @@ ERROR_BAD_FLAG = 2
 ERROR_HASH_MISMATCH = 3
 ERROR_DECODE = 4
 ERROR_IO = 5
+ERROR_SERIAL_INIT = 6
+ERROR_SERIAL_WRITE = 7
+ERROR_SERIAL_READ = 8
+ERROR_SERIAL_DISCONNECTED = 9
+ERROR_DEVICE_UNREACHABLE = 10
 
 CHANNEL_DISABLED = 0
 CHANNEL_OK = 1
 CHANNEL_COMM_ERROR = 2
 CHANNEL_PROTOCOL_ERROR = 3
 CHANNEL_FAILED = 4
+CHANNEL_RECONNECTING = 5
 
 SERVICE_LINE_STATUS_BASE = 10
 LOGIC_UNIT_MASK_REGISTER = 48
@@ -40,6 +48,11 @@ LOGIC_UNIT_COUNT = 8
 WRITE_VERIFY_ATTEMPTS = 3
 WRITE_VERIFY_DELAY_SECONDS = 0.35
 FLOAT_VERIFY_TOLERANCE = 0.051
+
+RECONNECT_DELAY_SECONDS = 5.0
+MAX_RECONNECT_ATTEMPTS = 3
+SERIAL_INIT_RETRY_COUNT = 2
+SERIAL_INIT_RETRY_DELAY = 1.0
 
 
 @dataclass(slots=True)
@@ -57,6 +70,17 @@ class DeviceState:
     protocol_error_counter: int = 0
     poll_cycle_counter: int = 0
     last_error_code: int = ERROR_NONE
+    is_online: bool = False
+    last_successful_poll: float = 0.0
+
+
+@dataclass(slots=True)
+class BusState:
+    """Extended state tracking for serial bus."""
+    is_connected: bool = False
+    last_error: str = ""
+    reconnect_attempts: int = 0
+    consecutive_failures: int = 0
 
 
 class OwenGatewayService:
@@ -68,6 +92,9 @@ class OwenGatewayService:
         }
         self.bus_locks = {bus.name: asyncio.Lock() for bus in config.buses}
         self.buses = {bus.name: bus for bus in config.buses}
+        self.bus_states: dict[str, BusState] = {
+            bus.name: BusState() for bus in config.buses
+        }
         self.points_by_bus = _group_points_by_bus_device(config.points)
         self.writable_points = _group_writable_points(config.points)
         self.modbus = ModbusPublisher(
@@ -98,6 +125,7 @@ class OwenGatewayService:
         self.gateway_poll_cycle_counter = 0
         self.gateway_last_error_code = ERROR_NONE
         self._state_lock = asyncio.Lock()
+        self._running = True
 
     async def run(self) -> None:
         started_buses: list[str] = []
@@ -124,17 +152,7 @@ class OwenGatewayService:
                     poll_cycle_counter=0,
                 )
             for bus in self.config.buses:
-                self.serial_clients[bus.name].connect()
-                started_buses.append(bus.name)
-                self.logger.info(
-                    "bus started: name=%s serial=%s %s,%s%s%s",
-                    bus.name,
-                    bus.serial.port,
-                    bus.serial.baudrate,
-                    bus.serial.bytesize,
-                    bus.serial.parity,
-                    bus.serial.stopbits,
-                )
+                await self._safe_connect_bus(bus, started_buses)
             self.logger.info(
                 "modbus started: %s:%s",
                 self.config.modbus.host,
@@ -144,23 +162,93 @@ class OwenGatewayService:
                 asyncio.create_task(self._poll_bus_loop(bus))
                 for bus in self.config.buses
             ]
+            tasks.append(asyncio.create_task(self._watchdog_loop()))
             await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            self.logger.info("gateway shutdown requested")
+        except Exception as exc:
+            self.logger.exception("gateway fatal error: %s", exc)
         finally:
+            self._running = False
             try:
-                # Startup may fail after opening only part of the configured
-                # serial buses, so shutdown must tolerate a partially started
-                # Modbus stack and close only successfully opened ports.
                 self.modbus.publish_status(SERVICE_SLAVE_ID, STATUS_OFFLINE)
                 for bus in self.config.buses:
                     self.bus_statuses[bus.name] = STATUS_OFFLINE
+                    self.bus_states[bus.name].is_connected = False
                 self._publish_line_statuses()
                 for slave_id in sorted({point.modbus_slave_id for point in self.config.points}):
                     self.modbus.publish_status(slave_id, STATUS_OFFLINE)
-            except RuntimeError:
-                pass
+            except Exception as exc:
+                self.logger.warning("error during shutdown: %s", exc)
             for bus_name in started_buses:
-                self.serial_clients[bus_name].close()
+                try:
+                    self.serial_clients[bus_name].close()
+                except Exception as exc:
+                    self.logger.warning("error closing bus %s: %s", bus_name, exc)
             await self.modbus.stop()
+            self.logger.info("gateway stopped")
+
+    async def _safe_connect_bus(self, bus: BusConfig, started_buses: list[str]) -> None:
+        """Safely connect to serial bus with retries."""
+        bus_state = self.bus_states[bus.name]
+        for attempt in range(1, SERIAL_INIT_RETRY_COUNT + 1):
+            try:
+                self.serial_clients[bus.name].connect()
+                bus_state.is_connected = True
+                bus_state.reconnect_attempts = 0
+                bus_state.consecutive_failures = 0
+                started_buses.append(bus.name)
+                self.logger.info(
+                    "bus connected: name=%s serial=%s %s,%s%s%s",
+                    bus.name,
+                    bus.serial.port,
+                    bus.serial.baudrate,
+                    bus.serial.bytesize,
+                    bus.serial.parity,
+                    bus.serial.stopbits,
+                )
+                return
+            except Exception as exc:
+                self.logger.warning(
+                    "bus connection attempt %s failed: name=%s error=%s",
+                    attempt,
+                    bus.name,
+                    exc,
+                )
+                if attempt < SERIAL_INIT_RETRY_COUNT:
+                    await asyncio.sleep(SERIAL_INIT_RETRY_DELAY)
+
+        # After all retries failed, still add to started_buses to allow cleanup
+        bus_state.last_error = f"connection failed after {SERIAL_INIT_RETRY_COUNT} attempts"
+        bus_state.is_connected = False
+        self.logger.error(
+            "bus connection failed permanently: name=%s error=%s",
+            bus.name,
+            bus_state.last_error,
+        )
+
+    async def _watchdog_loop(self) -> None:
+        """Periodic watchdog to check bus health and attempt reconnection."""
+        while self._running:
+            await asyncio.sleep(RECONNECT_DELAY_SECONDS)
+            if not self._running:
+                break
+            for bus in self.config.buses:
+                bus_state = self.bus_states[bus.name]
+                if bus_state.consecutive_failures > 0 and bus_state.is_connected:
+                    # Bus has failures, check if we need to reconnect
+                    if bus_state.consecutive_failures >= 3:
+                        self.logger.warning(
+                            "bus reconnecting after %s failures: name=%s",
+                            bus_state.consecutive_failures,
+                            bus.name,
+                        )
+                        try:
+                            self.serial_clients[bus.name].close()
+                        except Exception:
+                            pass
+                        bus_state.is_connected = False
+                        await self._safe_connect_bus(bus, started_buses=[])
 
     async def _poll_bus_loop(self, bus: BusConfig) -> None:
         while True:
@@ -175,224 +263,306 @@ class OwenGatewayService:
         if not points_by_slave:
             return
 
+        bus_state = self.bus_states[bus.name]
+        total_cycle_failures = 0
+
         for slave_id, points in points_by_slave.items():
+            if not self._running:
+                return
+
             failures = 0
             protocol_failures = 0
             last_error_code = ERROR_NONE
             device_state = self.device_states[(bus.name, slave_id)]
-            for point in points:
-                point_state = self.point_states[point.name]
-                if point_state.recovery_skip_cycles > 0:
-                    point_state.recovery_skip_cycles -= 1
-                    self.modbus.publish_point_metadata(
-                        slave_id,
-                        point,
-                        channel_status=CHANNEL_FAILED,
-                    )
-                    self.logger.debug(
-                        "skipping failed point bus=%s slave=%s %s remaining_skip_cycles=%s",
-                        bus.name,
-                        slave_id,
-                        point.name,
-                        point_state.recovery_skip_cycles,
-                    )
-                    failures += 1
-                    continue
-                frame = None
-                try:
-                    async with self.bus_locks[bus.name]:
-                        request, response, frame = await asyncio.to_thread(
-                            self.serial_clients[bus.name].exchange,
-                            point.address,
-                            point.parameter,
-                            point.parameter_index,
-                        )
-                    if self.config.diagnostics:
-                        self.logger.info(
-                            "diag bus=%s slave=%s point=%s request=%s response=%s",
-                            bus.name,
-                            slave_id,
-                            point.name,
-                            request.hex(" "),
-                            response.hex(" "),
-                        )
-                    if frame.request:
-                        raise RuntimeError(
-                            f"invalid response for {point.name}: request flag is set in response"
-                        )
-                    expected_hash = hash_parameter_name(point.parameter)
-                    if frame.parameter_hash != expected_hash:
-                        raise RuntimeError(
-                            f"invalid response for {point.name}: hash mismatch "
-                            f"0x{frame.parameter_hash:04X} != 0x{expected_hash:04X}"
-                        )
-                    time_mark = _extract_time_mark(frame.payload)
-                    if frame.payload == b"":
-                        point_state.consecutive_failures = 0
-                        point_state.channel_status = CHANNEL_DISABLED
-                        self.modbus.publish_point_metadata(
-                            slave_id,
-                            point,
-                            time_mark=None,
-                            channel_status=CHANNEL_DISABLED,
-                        )
-                        self.logger.info(
-                            "empty payload bus=%s slave=%s %s address=%s parameter=%s",
-                            bus.name,
-                            slave_id,
-                            point.name,
-                            point.address,
-                            point.parameter,
-                        )
-                        self.point_values[point.name] = None
-                        continue
-                    value: object = decode_payload(frame.payload, point.protocol_format)
-                    if self.config.diagnostics:
-                        self.logger.debug(
-                            "decoded bus=%s slave=%s point=%s value=%r",
-                            bus.name,
-                            slave_id,
-                            point.name,
-                            value,
-                        )
-                    self.point_values[point.name] = value
-                    self.modbus.publish(slave_id, point, value)
-                    point_state.consecutive_failures = 0
-                    point_state.channel_status = CHANNEL_OK
-                    self.modbus.publish_point_metadata(
-                        slave_id,
-                        point,
-                        time_mark=time_mark,
-                        channel_status=point_state.channel_status,
-                    )
-                    async with self._state_lock:
-                        device_state.success_counter = _inc_counter(
-                            device_state.success_counter
-                        )
-                        self.gateway_success_counter = _inc_counter(
-                            self.gateway_success_counter
-                        )
-                    target_description = (
-                        f"{point.register_type}:{point.modbus_address}"
-                        if point.publish_to_modbus
-                        else "internal-only"
-                    )
-                    self.logger.debug(
-                        "processed bus=%s slave=%s %s=%r from address=%s parameter=%s target=%s mark=%s status=%s",
-                        bus.name,
-                        slave_id,
-                        point.name,
-                        value,
-                        point.address,
-                        point.parameter,
-                        target_description,
-                        time_mark,
-                        point_state.channel_status,
-                    )
-                except TimeoutError:
-                    failures += 1
-                    point_state.consecutive_failures += 1
-                    point_state.channel_status = _failure_status(
-                        point_state,
-                        self.config.health.fault_after_failures,
-                        self.config.health.recovery_poll_interval_cycles,
-                        CHANNEL_COMM_ERROR,
-                    )
-                    self.modbus.publish_point_metadata(
-                        slave_id,
-                        point,
-                        channel_status=point_state.channel_status,
-                    )
-                    async with self._state_lock:
-                        device_state.timeout_counter = _inc_counter(
-                            device_state.timeout_counter
-                        )
-                        self.gateway_timeout_counter = _inc_counter(
-                            self.gateway_timeout_counter
-                        )
-                    last_error_code = ERROR_TIMEOUT
-                    self.logger.warning(
-                        "timeout reading bus=%s slave=%s %s address=%s parameter=%s",
-                        bus.name,
-                        slave_id,
-                        point.name,
-                        point.address,
-                        point.parameter,
-                    )
-                except (ValueError, RuntimeError):
-                    failures += 1
-                    protocol_failures += 1
-                    point_state.consecutive_failures += 1
-                    point_state.channel_status = _failure_status(
-                        point_state,
-                        self.config.health.fault_after_failures,
-                        self.config.health.recovery_poll_interval_cycles,
-                        CHANNEL_PROTOCOL_ERROR,
-                    )
-                    self.modbus.publish_point_metadata(
-                        slave_id,
-                        point,
-                        channel_status=point_state.channel_status,
-                    )
-                    async with self._state_lock:
-                        device_state.protocol_error_counter = _inc_counter(
-                            device_state.protocol_error_counter
-                        )
-                        self.gateway_protocol_error_counter = _inc_counter(
-                            self.gateway_protocol_error_counter
-                        )
-                    last_error_code = _map_protocol_error(point, frame)
-                    self.logger.exception(
-                        "protocol error for bus=%s slave=%s %s address=%s parameter=%s",
-                        bus.name,
-                        slave_id,
-                        point.name,
-                        point.address,
-                        point.parameter,
-                    )
-                except Exception:
-                    failures += 1
-                    point_state.consecutive_failures += 1
-                    point_state.channel_status = _failure_status(
-                        point_state,
-                        self.config.health.fault_after_failures,
-                        self.config.health.recovery_poll_interval_cycles,
-                        CHANNEL_COMM_ERROR,
-                    )
-                    self.modbus.publish_point_metadata(
-                        slave_id,
-                        point,
-                        channel_status=point_state.channel_status,
-                    )
-                    async with self._state_lock:
-                        self.gateway_timeout_counter = _inc_counter(
-                            self.gateway_timeout_counter
-                        )
-                    last_error_code = ERROR_IO
-                    self.logger.exception(
-                        "poll failed for bus=%s slave=%s %s address=%s parameter=%s",
-                        bus.name,
-                        slave_id,
-                        point.name,
-                        point.address,
-                        point.parameter,
-                    )
 
-            self._publish_logic_unit_masks(bus.name, slave_id, points)
-            if failures == 0:
-                device_status = STATUS_OK
-            elif protocol_failures == len(points):
-                device_status = STATUS_PROTOCOL_ERROR
-            elif failures == len(points):
-                device_status = STATUS_OFFLINE
-            else:
-                device_status = STATUS_DEGRADED
-            await self._record_device_result(
+            # Isolate each device polling - failure in one device should not affect others
+            try:
+                await self._poll_device(bus, slave_id, points, device_state)
+            except Exception as exc:
+                self.logger.exception(
+                    "device polling crashed (isolated): bus=%s slave=%s error=%s",
+                    bus.name,
+                    slave_id,
+                    exc,
+                )
+                total_cycle_failures += len(points)
+
+        # Update bus state based on overall cycle results
+        if total_cycle_failures > 0:
+            bus_state.consecutive_failures += 1
+            if bus_state.consecutive_failures >= 5:
+                bus_state.is_connected = False
+                self.logger.error(
+                    "bus marked disconnected after %s consecutive failures: name=%s",
+                    bus_state.consecutive_failures,
+                    bus.name,
+                )
+        else:
+            bus_state.consecutive_failures = 0
+
+        # Update bus status register
+        await self._update_bus_status(bus.name)
+
+    async def _poll_device(
+        self,
+        bus: BusConfig,
+        slave_id: int,
+        points: list[PointConfig],
+        device_state: DeviceState,
+    ) -> None:
+        """Poll a single device, isolated from other device failures."""
+        failures = 0
+        protocol_failures = 0
+        last_error_code = ERROR_NONE
+
+        for point in points:
+            if not self._running:
+                return
+
+            point_state = self.point_states[point.name]
+            if point_state.recovery_skip_cycles > 0:
+                point_state.recovery_skip_cycles -= 1
+                self.modbus.publish_point_metadata(
+                    slave_id,
+                    point,
+                    channel_status=CHANNEL_FAILED,
+                )
+                self.logger.debug(
+                    "skipping failed point bus=%s slave=%s %s remaining_skip_cycles=%s",
+                    bus.name,
+                    slave_id,
+                    point.name,
+                    point_state.recovery_skip_cycles,
+                )
+                failures += 1
+                continue
+
+            # Each point polling is isolated
+            point_error_code = await self._poll_single_point(
+                bus, slave_id, point, point_state, device_state
+            )
+            if point_error_code != ERROR_NONE:
+                failures += 1
+                if point_error_code in (ERROR_BAD_FLAG, ERROR_HASH_MISMATCH, ERROR_DECODE):
+                    protocol_failures += 1
+                last_error_code = point_error_code
+
+        # Calculate device status
+        if failures == 0:
+            device_status = STATUS_OK
+            device_state.is_online = True
+        elif protocol_failures == len(points):
+            device_status = STATUS_PROTOCOL_ERROR
+        elif failures == len(points):
+            device_status = STATUS_OFFLINE
+            device_state.is_online = False
+        else:
+            device_status = STATUS_DEGRADED
+
+        await self._record_device_result(
+            bus.name,
+            slave_id,
+            device_status,
+            last_error_code,
+        )
+
+    async def _poll_single_point(
+        self,
+        bus: BusConfig,
+        slave_id: int,
+        point: PointConfig,
+        point_state: PointState,
+        device_state: DeviceState,
+    ) -> int:
+        """Poll a single point with full error isolation. Returns error code."""
+        frame = None
+        try:
+            async with self.bus_locks[bus.name]:
+                request, response, frame = await asyncio.to_thread(
+                    self.serial_clients[bus.name].exchange,
+                    point.address,
+                    point.parameter,
+                    point.parameter_index,
+                )
+            if self.config.diagnostics:
+                self.logger.info(
+                    "diag bus=%s slave=%s point=%s request=%s response=%s",
+                    bus.name,
+                    slave_id,
+                    point.name,
+                    request.hex(" "),
+                    response.hex(" "),
+                )
+            if frame.request:
+                raise RuntimeError(
+                    f"invalid response for {point.name}: request flag is set in response"
+                )
+            expected_hash = hash_parameter_name(point.parameter)
+            if frame.parameter_hash != expected_hash:
+                raise RuntimeError(
+                    f"invalid response for {point.name}: hash mismatch "
+                    f"0x{frame.parameter_hash:04X} != 0x{expected_hash:04X}"
+                )
+            time_mark = _extract_time_mark(frame.payload)
+            if frame.payload == b"":
+                point_state.consecutive_failures = 0
+                point_state.channel_status = CHANNEL_DISABLED
+                self.modbus.publish_point_metadata(
+                    slave_id,
+                    point,
+                    time_mark=None,
+                    channel_status=CHANNEL_DISABLED,
+                )
+                self.logger.info(
+                    "empty payload bus=%s slave=%s %s address=%s parameter=%s",
+                    bus.name,
+                    slave_id,
+                    point.name,
+                    point.address,
+                    point.parameter,
+                )
+                self.point_values[point.name] = None
+                return ERROR_NONE
+            value: object = decode_payload(frame.payload, point.protocol_format)
+            if self.config.diagnostics:
+                self.logger.debug(
+                    "decoded bus=%s slave=%s point=%s value=%r",
+                    bus.name,
+                    slave_id,
+                    point.name,
+                    value,
+                )
+            self.point_values[point.name] = value
+            self.modbus.publish(slave_id, point, value)
+            point_state.consecutive_failures = 0
+            point_state.channel_status = CHANNEL_OK
+            self.modbus.publish_point_metadata(
+                slave_id,
+                point,
+                time_mark=time_mark,
+                channel_status=point_state.channel_status,
+            )
+            async with self._state_lock:
+                device_state.success_counter = _inc_counter(
+                    device_state.success_counter
+                )
+                self.gateway_success_counter = _inc_counter(
+                    self.gateway_success_counter
+                )
+            self.logger.debug(
+                "processed bus=%s slave=%s %s=%r from address=%s parameter=%s",
                 bus.name,
                 slave_id,
-                device_status,
-                last_error_code,
+                point.name,
+                value,
+                point.address,
+                point.parameter,
             )
+            return ERROR_NONE
+        except TimeoutError:
+            point_state.consecutive_failures += 1
+            point_state.channel_status = _failure_status(
+                point_state,
+                self.config.health.fault_after_failures,
+                self.config.health.recovery_poll_interval_cycles,
+                CHANNEL_COMM_ERROR,
+            )
+            self.modbus.publish_point_metadata(
+                slave_id,
+                point,
+                channel_status=point_state.channel_status,
+            )
+            async with self._state_lock:
+                device_state.timeout_counter = _inc_counter(
+                    device_state.timeout_counter
+                )
+                self.gateway_timeout_counter = _inc_counter(
+                    self.gateway_timeout_counter
+                )
+            self.logger.warning(
+                "timeout reading bus=%s slave=%s %s address=%s parameter=%s",
+                bus.name,
+                slave_id,
+                point.name,
+                point.address,
+                point.parameter,
+            )
+            return ERROR_TIMEOUT
+        except (ValueError, RuntimeError) as exc:
+            point_state.consecutive_failures += 1
+            point_state.channel_status = _failure_status(
+                point_state,
+                self.config.health.fault_after_failures,
+                self.config.health.recovery_poll_interval_cycles,
+                CHANNEL_PROTOCOL_ERROR,
+            )
+            self.modbus.publish_point_metadata(
+                slave_id,
+                point,
+                channel_status=point_state.channel_status,
+            )
+            async with self._state_lock:
+                device_state.protocol_error_counter = _inc_counter(
+                    device_state.protocol_error_counter
+                )
+                self.gateway_protocol_error_counter = _inc_counter(
+                    self.gateway_protocol_error_counter
+                )
+            error_code = _map_protocol_error(point, frame)
+            self.logger.warning(
+                "protocol error bus=%s slave=%s %s address=%s parameter=%s: %s",
+                bus.name,
+                slave_id,
+                point.name,
+                point.address,
+                point.parameter,
+                exc,
+            )
+            return error_code
+        except Exception as exc:
+            point_state.consecutive_failures += 1
+            point_state.channel_status = _failure_status(
+                point_state,
+                self.config.health.fault_after_failures,
+                self.config.health.recovery_poll_interval_cycles,
+                CHANNEL_COMM_ERROR,
+            )
+            self.modbus.publish_point_metadata(
+                slave_id,
+                point,
+                channel_status=point_state.channel_status,
+            )
+            async with self._state_lock:
+                self.gateway_timeout_counter = _inc_counter(
+                    self.gateway_timeout_counter
+                )
+            self.logger.error(
+                "unexpected error polling bus=%s slave=%s %s address=%s parameter=%s: %s",
+                bus.name,
+                slave_id,
+                point.name,
+                point.address,
+                point.parameter,
+                exc,
+                exc_info=True,
+            )
+            return ERROR_IO
+
+    async def _update_bus_status(self, bus_name: str) -> None:
+        """Update bus status based on all device states and bus connection state."""
+        bus_state = self.bus_states[bus_name]
+        device_statuses = [
+            device.status
+            for (device_bus, _), device in self.device_states.items()
+            if device_bus == bus_name
+        ]
+        if not device_statuses:
+            return
+        if not bus_state.is_connected:
+            self.bus_statuses[bus_name] = STATUS_DISCONNECTED
+        else:
+            self.bus_statuses[bus_name] = _aggregate_status(device_statuses)
+        self._publish_line_statuses()
 
     async def _record_device_result(
         self,

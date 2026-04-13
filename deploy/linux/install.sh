@@ -73,6 +73,9 @@ fi
   --exclude 'archive' \
   "${REPO_DIR}/" "${APP_DIR}/"
 
+# Ensure bash menu is executable
+"${RUN_AS_ROOT[@]}" chmod +x "${APP_DIR}/deploy/linux/owen-gateway.sh" 2>/dev/null || true
+
 "${RUN_AS_ROOT[@]}" "${PYTHON_BIN}" -m venv ${VENV_ARGS} "${APP_DIR}/.venv"
 "${RUN_AS_ROOT[@]}" "${APP_DIR}/.venv/bin/pip" install --upgrade pip
 "${RUN_AS_ROOT[@]}" "${APP_DIR}/.venv/bin/pip" install -r "${APP_DIR}/requirements.txt"

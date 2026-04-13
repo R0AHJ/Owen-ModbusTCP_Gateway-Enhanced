@@ -17,17 +17,425 @@ from owen_gateway.config import (
 )
 
 
+# ==============================================================================
+# Константы для карты регистров TRM138
+# ==============================================================================
+# Количество каналов TRM138
 TRM138_CHANNEL_COUNT = 8
+# Базовый адрес регистров значений
 TRM138_REGISTER_BASE = 16
+# Количество регистров на канал для значения
 TRM138_VALUE_REGISTERS_PER_CHANNEL = 2
+# Базовый адрес регистров меток времени
 TRM138_TIME_MARK_BASE = TRM138_REGISTER_BASE + (
     TRM138_CHANNEL_COUNT * TRM138_VALUE_REGISTERS_PER_CHANNEL
 )
+# Базовый адрес регистров статуса каналов
 TRM138_STATUS_BASE = TRM138_TIME_MARK_BASE + TRM138_CHANNEL_COUNT
+# Базовый адрес регистров уставок
 TRM138_SETPOINT_BASE = 56
 
 
+# ==============================================================================
+# Функции управления каналами приборов
+# ==============================================================================
+
+def enable_channel(
+    payload: dict[str, object],
+    *,
+    line: int,
+    channel: int,
+    device: int | None = None,
+    base_address: int | None = None,
+) -> dict[str, int | str]:
+    """
+    Включить канал прибора для опроса.
+
+    Args:
+        payload: Конфигурация шлюза
+        line: Номер линии (1-2)
+        channel: Номер канала (1-8)
+        device: Номер устройства (опционально)
+        base_address: Базовый адрес OWEN (опционально)
+
+    Returns:
+        Словарь с информацией о включенном канале
+    """
+    return _toggle_channel(
+        payload,
+        line=line,
+        channel=channel,
+        device=device,
+        base_address=base_address,
+        enabled=True,
+    )
+
+
+def disable_channel(
+    payload: dict[str, object],
+    *,
+    line: int,
+    channel: int,
+    device: int | None = None,
+    base_address: int | None = None,
+) -> dict[str, int | str]:
+    """
+    Отключить канал прибора от опроса.
+
+    Отключенный канал не опрашивается, но конфигурация сохраняется.
+    Для полного удаления используйте remove_trm138_device.
+
+    Args:
+        payload: Конфигурация шлюза
+        line: Номер линии (1-2)
+        channel: Номер канала (1-8)
+        device: Номер устройства (опционально)
+        base_address: Базовый адрес OWEN (опционально)
+
+    Returns:
+        Словарь с информацией об отключенном канале
+    """
+    return _toggle_channel(
+        payload,
+        line=line,
+        channel=channel,
+        device=device,
+        base_address=base_address,
+        enabled=False,
+    )
+
+
+def _toggle_channel(
+    payload: dict[str, object],
+    *,
+    line: int,
+    channel: int,
+    device: int | None,
+    base_address: int | None,
+    enabled: bool,
+) -> dict[str, int | str]:
+    """
+    Внутренняя функция для включения/отключения канала.
+
+    Args:
+        payload: Конфигурация шлюза
+        line: Номер линии
+        channel: Номер канала
+        device: Номер устройства
+        base_address: Базовый адрес
+        enabled: True - включить, False - отключить
+
+    Returns:
+        Результат операции
+    """
+    if not 1 <= channel <= TRM138_CHANNEL_COUNT:
+        raise ValueError(f"номер канала должен быть от 1 до {TRM138_CHANNEL_COUNT}")
+
+    bus_name = _resolve_bus_name(payload, line)
+    points = _get_points(payload)
+    grouped = _group_bus_devices(points, bus_name)
+
+    matched_device = _match_device(
+        grouped,
+        bus_name=bus_name,
+        device=device,
+        base_address=base_address,
+        tag=None,
+    )
+
+    # Находим точку rEAd для указанного канала
+    owen_address = base_address + channel - 1 if base_address else None
+    target_points = [
+        point for point in grouped[matched_device]
+        if point.get("parameter") == "rEAd"
+        and (owen_address is None or point.get("address") == owen_address)
+    ]
+
+    # Фильтруем по номеру канала
+    found_points = [
+        point for point in target_points
+        if _channel_number_from_oven_address(
+            int(point["address"]),
+            int(point["modbus_slave_id"])
+        ) == channel
+    ]
+
+    if not found_points:
+        raise ValueError(
+            f"канал CH{channel} не найден на устройстве "
+            f"(базовый адрес={base_address}, устройство={device})"
+        )
+
+    # Отключаем/включаем все точки канала
+    disabled_count = 0
+    channel_base_address = None
+    for point in found_points:
+        point["enabled"] = enabled
+        disabled_count += 1
+        if channel_base_address is None:
+            channel_base_address = point.get("address")
+
+    action = "включен" if enabled else "отключен"
+    return {
+        "bus": bus_name,
+        "device": matched_device,
+        "channel": channel,
+        "channel_base_address": channel_base_address,
+        "action": action,
+        "affected_points": disabled_count,
+    }
+
+
+def get_channel_status(
+    payload: dict[str, object],
+    *,
+    line: int,
+    device: int | None = None,
+    base_address: int | None = None,
+) -> list[dict[str, object]]:
+    """
+    Получить статус всех каналов устройства.
+
+    Args:
+        payload: Конфигурация шлюза
+        line: Номер линии (1-2)
+        device: Номер устройства (опционально)
+        base_address: Базовый адрес OWEN (опционально)
+
+    Returns:
+        Список каналов с их статусом
+    """
+    bus_name = _resolve_bus_name(payload, line)
+    points = _get_points(payload)
+    grouped = _group_bus_devices(points, bus_name)
+
+    matched_device = _match_device(
+        grouped,
+        bus_name=bus_name,
+        device=device,
+        base_address=base_address,
+        tag=None,
+    )
+
+    device_points = grouped[matched_device]
+    base_addr = min(
+        int(point["address"])
+        for point in device_points
+        if str(point.get("parameter")) == "rEAd"
+    )
+
+    # Собираем статус для каждого канала
+    channels_status = []
+    for ch in range(1, TRM138_CHANNEL_COUNT + 1):
+        read_points = [
+            p for p in device_points
+            if p.get("parameter") == "rEAd"
+            and _channel_number_from_oven_address(int(p["address"]), base_addr) == ch
+        ]
+
+        if not read_points:
+            # Канал не настроен
+            channels_status.append({
+                "channel": ch,
+                "configured": False,
+                "enabled": None,
+                "address": base_addr + ch - 1,
+            })
+        else:
+            point = read_points[0]
+            enabled = point.get("enabled", True)
+            channels_status.append({
+                "channel": ch,
+                "configured": True,
+                "enabled": enabled,
+                "address": point.get("address"),
+            })
+
+    return channels_status
+
+
+# ==============================================================================
+# Функции валидации конфигурации
+# ==============================================================================
+
+def validate_config(payload: dict[str, object]) -> list[dict[str, object]]:
+    """
+    Проверить конфигурацию на ошибки и конфликты.
+
+    Проверяет:
+    - Пересечения адресов OWEN на одной линии
+    - Пересечения Modbus адресов для одного Slave ID
+    - Корректность базовых адресов приборов
+    - Наличие обязательных секций
+
+    Args:
+        payload: Конфигурация шлюза
+
+    Returns:
+        Список обнаруженных проблем (пустой если всё OK)
+    """
+    issues: list[dict[str, object]] = []
+
+    # Проверка наличия обязательных секций
+    required_sections = ["buses", "modbus", "points"]
+    for section in required_sections:
+        if section not in payload:
+            issues.append({
+                "type": "missing_section",
+                "severity": "error",
+                "message": f"отсутствует обязательная секция: {section}",
+            })
+
+    if "buses" not in payload or "modbus" not in payload:
+        return issues
+
+    buses = _get_buses(payload)
+    points = _get_points(payload)
+
+    # Проверка: на каждой линии адреса OWEN не должны пересекаться
+    for bus in buses:
+        bus_name = bus["name"]
+        bus_points = [p for p in points if p.get("bus") == bus_name]
+
+        # Группируем по адресам
+        address_groups: dict[int, list[dict[str, object]]] = {}
+        for point in bus_points:
+            addr = point.get("address")
+            if addr is not None:
+                address_groups.setdefault(int(addr), []).append(point)
+
+        # Ищем пересечения
+        for addr, addr_points in address_groups.items():
+            if len(addr_points) > 1:
+                # Проверяем, разные ли это устройства
+                devices = set(int(p.get("device", 0)) for p in addr_points)
+                if len(devices) > 1:
+                    issues.append({
+                        "type": "owen_address_overlap",
+                        "severity": "error",
+                        "bus": bus_name,
+                        "address": addr,
+                        "devices": list(devices),
+                        "message": (
+                            f"пересечение OWEN адреса {addr} на линии {bus_name}: "
+                            f"используется устройствами {devices}"
+                        ),
+                    })
+
+    # Проверка: Modbus адреса не должны пересекаться для одного Slave ID
+    slave_groups: dict[int, list[dict[str, object]]] = {}
+    for point in points:
+        slave_id = point.get("modbus_slave_id")
+        if slave_id is not None:
+            slave_groups.setdefault(int(slave_id), []).append(point)
+
+    for slave_id, slave_points in slave_groups.items():
+        # Группируем по Modbus адресам
+        modbus_groups: dict[int, list[dict[str, object]]] = {}
+        for point in slave_points:
+            mb_addr = point.get("modbus_address")
+            mb_type = point.get("register_type", "holding_register")
+            key = (int(mb_addr) if mb_addr is not None else 0, mb_type)
+            modbus_groups.setdefault(key, []).append(point)
+
+        for (mb_addr, mb_type), mb_points in modbus_groups.items():
+            if len(mb_points) > 1:
+                # Проверяем, разные ли это точки
+                point_names = [p.get("name", "?") for p in mb_points]
+                if len(set(point_names)) > 1:
+                    issues.append({
+                        "type": "modbus_address_overlap",
+                        "severity": "error",
+                        "slave_id": slave_id,
+                        "address": mb_addr,
+                        "register_type": mb_type,
+                        "points": point_names,
+                        "message": (
+                            f"пересечение Modbus адреса {mb_type}[{mb_addr}] "
+                            f"для Slave ID {slave_id}: {point_names}"
+                        ),
+                    })
+
+    # Проверка: адреса OWEN должны быть в допустимом диапазоне
+    for bus in buses:
+        bus_name = bus["name"]
+        address_bits = bus.get("serial", {}).get("address_bits", 8)
+        max_address = (1 << address_bits) - 1
+
+        bus_points = [p for p in points if p.get("bus") == bus_name]
+        for point in bus_points:
+            addr = point.get("address")
+            if addr is not None and int(addr) > max_address:
+                issues.append({
+                    "type": "owen_address_out_of_range",
+                    "severity": "warning",
+                    "bus": bus_name,
+                    "address": addr,
+                    "max_address": max_address,
+                    "message": (
+                        f"OWEN адрес {addr} на линии {bus_name} превышает "
+                        f"максимальное значение {max_address} для {address_bits}-бит адресации"
+                    ),
+                })
+
+    # Проверка: Modbus адреса должны быть положительными
+    for point in points:
+        mb_addr = point.get("modbus_address")
+        if mb_addr is not None and int(mb_addr) < 0:
+            issues.append({
+                "type": "modbus_address_negative",
+                "severity": "error",
+                "point": point.get("name"),
+                "address": mb_addr,
+                "message": f"отрицательный Modbus адрес {mb_addr} в точке {point.get('name')}",
+            })
+
+    return issues
+
+
+def render_validation_report(issues: list[dict[str, object]]) -> str:
+    """
+    Сформировать текстовый отчет о проверке конфигурации.
+
+    Args:
+        issues: Список проблем от validate_config()
+
+    Returns:
+        Текстовый отчет
+    """
+    if not issues:
+        return "✓ Конфигурация корректна, ошибок не обнаружено"
+
+    lines = ["⚠ Обнаружены проблемы в конфигурации:", ""]
+
+    errors = [i for i in issues if i.get("severity") == "error"]
+    warnings = [i for i in issues if i.get("severity") == "warning"]
+
+    if errors:
+        lines.append(f"Ошибки ({len(errors)}):")
+        for issue in errors:
+            lines.append(f"  • {issue.get('message', str(issue))}")
+        lines.append("")
+
+    if warnings:
+        lines.append(f"Предупреждения ({len(warnings)}):")
+        for issue in warnings:
+            lines.append(f"  • {issue.get('message', str(issue))}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def load_config_document(path: str | Path) -> dict[str, object]:
+    """
+    Загрузить конфигурацию из JSON файла.
+
+    Args:
+        path: Путь к файлу конфигурации
+
+    Returns:
+        Словарь с конфигурацией
+    """
     config_path = Path(path)
     if not config_path.exists():
         return _new_config_document()

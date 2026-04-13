@@ -8,7 +8,10 @@ import sys
 from owen_gateway.config import load_config
 from owen_gateway.config_tools import (
     add_trm138_device,
+    enable_channel,
+    disable_channel,
     export_config_document,
+    get_channel_status,
     get_line_devices,
     load_config_document,
     parse_channels,
@@ -17,9 +20,11 @@ from owen_gateway.config_tools import (
     render_config_summary,
     render_device_details,
     render_line_devices,
+    render_validation_report,
     save_config_document,
     set_line,
     update_trm138_channels,
+    validate_config,
     write_generated_modbus_map,
 )
 from owen_gateway.service import OwenGatewayService
@@ -113,6 +118,47 @@ def build_config_parser() -> argparse.ArgumentParser:
     export_parser = subparsers.add_parser("export-config", help="save current config to another file")
     export_parser.add_argument("--config", default="owen_config.json", help="source config json")
     export_parser.add_argument("--output", required=True, help="target config json")
+
+    # -------------------------------------------------------------------------
+    # Новые команды для управления каналами
+    # -------------------------------------------------------------------------
+    channel_status_parser = subparsers.add_parser(
+        "channel-status",
+        help="показать статус каналов устройства",
+    )
+    channel_status_parser.add_argument("--config", default="owen_config.json", help="path to config json")
+    channel_status_parser.add_argument("--line", type=int, required=True, help="номер линии 1..2")
+    channel_status_parser.add_argument("--device", type=int, help="номер устройства")
+    channel_status_parser.add_argument("--base-address", type=int, help="базовый адрес OWEN")
+
+    channel_enable_parser = subparsers.add_parser(
+        "channel-enable",
+        help="включить канал для опроса",
+    )
+    channel_enable_parser.add_argument("--config", default="owen_config.json", help="path to config json")
+    channel_enable_parser.add_argument("--line", type=int, required=True, help="номер линии 1..2")
+    channel_enable_parser.add_argument("--channel", type=int, required=True, help="номер канала 1..8")
+    channel_enable_parser.add_argument("--device", type=int, help="номер устройства")
+    channel_enable_parser.add_argument("--base-address", type=int, help="базовый адрес OWEN")
+
+    channel_disable_parser = subparsers.add_parser(
+        "channel-disable",
+        help="отключить канал от опроса",
+    )
+    channel_disable_parser.add_argument("--config", default="owen_config.json", help="path to config json")
+    channel_disable_parser.add_argument("--line", type=int, required=True, help="номер линии 1..2")
+    channel_disable_parser.add_argument("--channel", type=int, required=True, help="номер канала 1..8")
+    channel_disable_parser.add_argument("--device", type=int, help="номер устройства")
+    channel_disable_parser.add_argument("--base-address", type=int, help="базовый адрес OWEN")
+
+    # -------------------------------------------------------------------------
+    # Команда проверки конфигурации
+    # -------------------------------------------------------------------------
+    validate_parser = subparsers.add_parser(
+        "validate",
+        help="проверить конфигурацию на ошибки",
+    )
+    validate_parser.add_argument("--config", default="owen_config.json", help="path to config json")
 
     return parser
 
@@ -272,6 +318,72 @@ def _run_config_tool(argv: list[str]) -> int:
         print(f"exported config: {target}")
         print(f"generated map: {target.with_name(f'{target.stem}.modbus_map.md')}")
         return 0
+
+    # -------------------------------------------------------------------------
+    # Обработчики команд управления каналами
+    # -------------------------------------------------------------------------
+
+    if args.config_command == "channel-status":
+        # Показать статус каналов устройства
+        if args.device is None and args.base_address is None:
+            parser.error("channel-status требует --device или --base-address")
+        channels = get_channel_status(
+            payload,
+            line=args.line,
+            device=args.device,
+            base_address=args.base_address,
+        )
+        print(f"\nСтатус каналов на линии {args.line}:")
+        print("-" * 40)
+        for ch in channels:
+            if ch["configured"]:
+                status = "включен" if ch["enabled"] else "отключен"
+                print(f"  CH{ch['channel']}: адрес={ch['address']} [{status}]")
+            else:
+                print(f"  CH{ch['channel']}: не настроен")
+        return 0
+
+    if args.config_command == "channel-enable":
+        # Включить канал
+        if args.device is None and args.base_address is None:
+            parser.error("channel-enable требует --device или --base-address")
+        result = enable_channel(
+            payload,
+            line=args.line,
+            channel=args.channel,
+            device=args.device,
+            base_address=args.base_address,
+        )
+        save_config_document(args.config, payload)
+        print(f"Канал CH{args.channel} включен на устройстве {result['device']}")
+        print(f"Линия: {result['bus']}, адрес: {result['channel_base_address']}")
+        return 0
+
+    if args.config_command == "channel-disable":
+        # Отключить канал
+        if args.device is None and args.base_address is None:
+            parser.error("channel-disable требует --device или --base-address")
+        result = disable_channel(
+            payload,
+            line=args.line,
+            channel=args.channel,
+            device=args.device,
+            base_address=args.base_address,
+        )
+        save_config_document(args.config, payload)
+        print(f"Канал CH{args.channel} отключен на устройстве {result['device']}")
+        print(f"Линия: {result['bus']}, адрес: {result['channel_base_address']}")
+        return 0
+
+    # -------------------------------------------------------------------------
+    # Обработчик проверки конфигурации
+    # -------------------------------------------------------------------------
+
+    if args.config_command == "validate":
+        # Проверить конфигурацию на ошибки
+        issues = validate_config(payload)
+        print(render_validation_report(issues))
+        return 0 if not issues else 1
 
     parser.error(f"unsupported config command: {args.config_command}")
     return 2
