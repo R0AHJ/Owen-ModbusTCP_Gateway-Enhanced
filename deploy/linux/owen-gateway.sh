@@ -251,6 +251,59 @@ config_remove_trm138() {
 }
 
 #===============================================================================
+# ФУНКЦИИ УПРАВЛЕНИЯ ЛИНИЯМИ
+#===============================================================================
+
+# Показать список линий
+line_list() {
+    echo -e "\n${BLUE}--- Список линий ---${NC}"
+    check_config || return 1
+    PYTHONPATH="${APP_DIR}" "${VENV_BIN}/python" -m owen_gateway config list-lines --config "${CONFIG_FILE}"
+}
+
+# Показать параметры линии
+line_show() {
+    echo -e "\n${BLUE}--- Параметры линии ---${NC}"
+    check_config || return 1
+
+    read -p "Номер линии [1]: " line
+    line="${line:-1}"
+
+    PYTHONPATH="${APP_DIR}" "${VENV_BIN}/python" -m owen_gateway config show-line --config "${CONFIG_FILE}" --line "${line}"
+}
+
+# Включить/выключить линию
+line_toggle() {
+    echo -e "\n${BLUE}--- Включить/выключить линию ---${NC}"
+    check_config || return 1
+
+    read -p "Номер линии [1]: " line
+    line="${line:-1}"
+
+    echo "Выберите действие:"
+    echo "  1. Включить линию"
+    echo "  2. Выключить линию"
+    read -p "Вариант: " action
+
+    case "$action" in
+        1)
+            PYTHONPATH="${APP_DIR}" "${VENV_BIN}/python" -m owen_gateway config line-enable \
+                --config "${CONFIG_FILE}" --line "${line}"
+            print_status "OK" "Линия ${line} включена"
+            ;;
+        2)
+            PYTHONPATH="${APP_DIR}" "${VENV_BIN}/python" -m owen_gateway config line-disable \
+                --config "${CONFIG_FILE}" --line "${line}"
+            print_status "OK" "Линия ${line} выключена"
+            ;;
+        *)
+            print_status "ERROR" "Неверный вариант"
+            return 1
+            ;;
+    esac
+}
+
+#===============================================================================
 # НОВЫЕ ФУНКЦИИ УПРАВЛЕНИЯ КАНАЛАМИ
 #===============================================================================
 
@@ -459,11 +512,12 @@ show_menu() {
     echo "  1. Управление службой"
     echo "  2. Инструменты конфигурации"
     echo "  3. Управление каналами"
-    echo "  4. Проверка конфигурации"
-    echo "  5. Диагностика (зонд)"
-    echo "  6. Системная информация"
-    echo "  7. Резервное копирование"
-    echo "  8. Просмотр логов"
+    echo "  4. Управление линиями"
+    echo "  5. Проверка конфигурации"
+    echo "  6. Диагностика (зонд)"
+    echo "  7. Системная информация"
+    echo "  8. Резервное копирование"
+    echo "  9. Просмотр логов"
     echo ""
     echo "  0. Выход"
     echo ""
@@ -571,13 +625,35 @@ validate_menu() {
     done
 }
 
+# Меню управления линиями
+line_menu() {
+    while true; do
+        echo -e "\n${BLUE}--- Управление линиями ---${NC}"
+        echo "  1. Список линий"
+        echo "  2. Показать параметры линии"
+        echo "  3. Включить/выключить линию"
+        echo ""
+        echo "  0. Назад в главное меню"
+        echo ""
+        read -p "Выберите вариант: " option
+
+        case "$option" in
+            1) line_list ;;
+            2) line_show ;;
+            3) line_toggle ;;
+            0) break ;;
+            *) print_status "ERROR" "Неверный вариант" ;;
+        esac
+    done
+}
+
 # Меню логов
 logs_menu() {
     while true; do
         echo -e "\n${BLUE}--- Логи ---${NC}"
-        echo "  1. Просмотр последних логов"
+        echo "  1. Просмотр последних логов (50 строк)"
         echo "  2. Только ошибки"
-        echo "  3. Следить за логами (онлайн)"
+        echo "  3. Следить за логами в реальном времени"
         echo ""
         echo "  0. Назад в главное меню"
         echo ""
@@ -586,7 +662,10 @@ logs_menu() {
         case "$option" in
             1) service_logs ;;
             2) service_logs_error ;;
-            3) service_logs ;;
+            3)
+                echo -e "\n${YELLOW}Для выхода нажмите Ctrl+C${NC}"
+                ${SUDO} journalctl -u "${SERVICE_NAME}.service" -f --no-pager
+                ;;
             0) break ;;
             *) print_status "ERROR" "Неверный вариант" ;;
         esac
@@ -710,11 +789,12 @@ main() {
             1) service_menu ;;
             2) config_menu ;;
             3) channel_menu ;;
-            4) validate_menu ;;
-            5) probe_run ;;
-            6) system_info ;;
-            7) config_backup ;;
-            8) logs_menu ;;
+            4) line_menu ;;
+            5) validate_menu ;;
+            6) probe_run ;;
+            7) system_info ;;
+            8) config_backup ;;
+            9) logs_menu ;;
             0)
                 echo "До свидания!"
                 exit 0

@@ -10,9 +10,12 @@ from owen_gateway.config_tools import (
     add_trm138_device,
     enable_channel,
     disable_channel,
+    disable_line,
+    enable_line,
     export_config_document,
     get_channel_status,
     get_line_devices,
+    list_lines,
     load_config_document,
     parse_channels,
     remove_line,
@@ -23,6 +26,7 @@ from owen_gateway.config_tools import (
     render_validation_report,
     save_config_document,
     set_line,
+    show_line,
     update_trm138_channels,
     validate_config,
     write_generated_modbus_map,
@@ -159,6 +163,36 @@ def build_config_parser() -> argparse.ArgumentParser:
         help="проверить конфигурацию на ошибки",
     )
     validate_parser.add_argument("--config", default="owen_config.json", help="path to config json")
+
+    # -------------------------------------------------------------------------
+    # Команды управления линиями
+    # -------------------------------------------------------------------------
+    list_lines_parser = subparsers.add_parser(
+        "list-lines",
+        help="показать все линии",
+    )
+    list_lines_parser.add_argument("--config", default="owen_config.json", help="path to config json")
+
+    show_line_parser = subparsers.add_parser(
+        "show-line",
+        help="показать параметры линии",
+    )
+    show_line_parser.add_argument("--config", default="owen_config.json", help="path to config json")
+    show_line_parser.add_argument("--line", type=int, required=True, help="номер линии 1..2")
+
+    line_enable_parser = subparsers.add_parser(
+        "line-enable",
+        help="включить линию",
+    )
+    line_enable_parser.add_argument("--config", default="owen_config.json", help="path to config json")
+    line_enable_parser.add_argument("--line", type=int, required=True, help="номер линии 1..2")
+
+    line_disable_parser = subparsers.add_parser(
+        "line-disable",
+        help="выключить линию",
+    )
+    line_disable_parser.add_argument("--config", default="owen_config.json", help="path to config json")
+    line_disable_parser.add_argument("--line", type=int, required=True, help="номер линии 1..2")
 
     return parser
 
@@ -384,6 +418,45 @@ def _run_config_tool(argv: list[str]) -> int:
         issues = validate_config(payload)
         print(render_validation_report(issues))
         return 0 if not issues else 1
+
+    # -------------------------------------------------------------------------
+    # Обработчики команд управления линиями
+    # -------------------------------------------------------------------------
+
+    if args.config_command == "list-lines":
+        # Показать список всех линий
+        lines = list_lines(payload)
+        if not lines:
+            print("Линии не настроены")
+        else:
+            print("\nНастроенные линии:")
+            print("-" * 50)
+            for line in lines:
+                status = "включена" if line["enabled"] else "выключена"
+                print(f"  {line['name']}: {status}")
+                print(f"    Порт: {line['port']}, Скорость: {line['baudrate']} бод")
+        return 0
+
+    if args.config_command == "show-line":
+        # Показать параметры линии
+        print(show_line(payload, line=args.line))
+        return 0
+
+    if args.config_command == "line-enable":
+        # Включить линию
+        result = enable_line(payload, line=args.line)
+        save_config_document(args.config, payload)
+        print(f"Линия {result['bus']} включена")
+        print(f"Порт: {result['port']}")
+        return 0
+
+    if args.config_command == "line-disable":
+        # Выключить линию
+        result = disable_line(payload, line=args.line)
+        save_config_document(args.config, payload)
+        print(f"Линия {result['bus']} выключена")
+        print(f"Порт: {result['port']}")
+        return 0
 
     parser.error(f"unsupported config command: {args.config_command}")
     return 2

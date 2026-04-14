@@ -37,6 +37,128 @@ TRM138_SETPOINT_BASE = 56
 
 
 # ==============================================================================
+# Функции управления линиями
+# ==============================================================================
+
+def enable_line(payload: dict[str, object], *, line: int) -> dict[str, object]:
+    """
+    Включить линию.
+
+    Args:
+        payload: Конфигурация шлюза
+        line: Номер линии (1-2)
+
+    Returns:
+        Информация о включенной линии
+    """
+    buses = _get_buses(payload)
+    bus_name = _resolve_bus_name(payload, line)
+
+    # Находим линию
+    for bus in buses:
+        if bus["name"] == bus_name:
+            bus["enabled"] = True
+            return {
+                "line": line,
+                "bus": bus_name,
+                "enabled": True,
+                "port": bus.get("serial", {}).get("port"),
+            }
+
+    raise ValueError(f"линия {bus_name} не настроена")
+
+
+def disable_line(payload: dict[str, object], *, line: int) -> dict[str, object]:
+    """
+    Выключить линию.
+
+    Args:
+        payload: Конфигурация шлюза
+        line: Номер линии (1-2)
+
+    Returns:
+        Информация о выключенной линии
+    """
+    buses = _get_buses(payload)
+    bus_name = _resolve_bus_name(payload, line)
+
+    # Находим линию
+    for bus in buses:
+        if bus["name"] == bus_name:
+            bus["enabled"] = False
+            return {
+                "line": line,
+                "bus": bus_name,
+                "enabled": False,
+                "port": bus.get("serial", {}).get("port"),
+            }
+
+    raise ValueError(f"линия {bus_name} не настроена")
+
+
+def list_lines(payload: dict[str, object]) -> list[dict[str, object]]:
+    """
+    Получить список всех линий с их параметрами.
+
+    Args:
+        payload: Конфигурация шлюза
+
+    Returns:
+        Список линий с параметрами
+    """
+    buses = _get_buses(payload)
+    result = []
+    for bus in buses:
+        result.append({
+            "name": bus["name"],
+            "enabled": bus.get("enabled", True),
+            "port": bus.get("serial", {}).get("port", "не настроен"),
+            "baudrate": bus.get("serial", {}).get("baudrate", 0),
+            "parity": bus.get("serial", {}).get("parity", "N"),
+            "poll_interval_ms": bus.get("poll_interval_ms", 0),
+        })
+    return result
+
+
+def show_line(payload: dict[str, object], *, line: int) -> str:
+    """
+    Показать параметры линии.
+
+    Args:
+        payload: Конфигурация шлюза
+        line: Номер линии (1-2)
+
+    Returns:
+        Текстовое представление параметров линии
+    """
+    bus_name = _resolve_bus_name(payload, line)
+    buses = _get_buses(payload)
+
+    for bus in buses:
+        if bus["name"] == bus_name:
+            serial = bus.get("serial", {})
+            enabled = bus.get("enabled", True)
+            status = "включена" if enabled else "выключена"
+
+            lines = [
+                f"Линия: {bus_name}",
+                f"Статус: {status}",
+                f"Порт: {serial.get('port', 'не настроен')}",
+                f"Скорость: {serial.get('baudrate', 'N/A')} бод",
+                f"Биты данных: {serial.get('bytesize', 'N/A')}",
+                f"Четность: {serial.get('parity', 'N/A')}",
+                f"Стоп-биты: {serial.get('stopbits', 'N/A')}",
+                f"Таймаут: {serial.get('timeout_ms', 'N/A')} мс",
+                f"Интервал опроса: {bus.get('poll_interval_ms', 'N/A')} мс",
+                f"Адресные биты: {serial.get('address_bits', 'N/A')}",
+                f"Modbus Slave Base: {bus.get('modbus_slave_base', 'N/A')}",
+            ]
+            return "\n".join(lines)
+
+    return f"Линия {bus_name} не настроена"
+
+
+# ==============================================================================
 # Функции управления каналами приборов
 # ==============================================================================
 
@@ -293,6 +415,8 @@ def validate_config(payload: dict[str, object]) -> list[dict[str, object]]:
     points = _get_points(payload)
 
     # Проверка: на каждой линии адреса OWEN не должны пересекаться
+    # ВНИМАНИЕ: один OWEN адрес используется для rEAd, C.SP и AL.t параметров
+    # одного канала - это нормально. Проверяем только пересечения РАЗНЫХ устройств.
     for bus in buses:
         bus_name = bus["name"]
         bus_points = [p for p in points if p.get("bus") == bus_name]
@@ -304,11 +428,13 @@ def validate_config(payload: dict[str, object]) -> list[dict[str, object]]:
             if addr is not None:
                 address_groups.setdefault(int(addr), []).append(point)
 
-        # Ищем пересечения
+        # Ищем пересечения - только если РАЗНЫЕ устройства используют один адрес
         for addr, addr_points in address_groups.items():
             if len(addr_points) > 1:
-                # Проверяем, разные ли это устройства
+                # Проверяем, разные ли это устройства (по полю device)
                 devices = set(int(p.get("device", 0)) for p in addr_points)
+                # Если все точки с одним адресом относятся к одному устройству - это нормально
+                # (разные параметры одного канала: rEAd, C.SP, AL.t)
                 if len(devices) > 1:
                     issues.append({
                         "type": "owen_address_overlap",
@@ -318,7 +444,7 @@ def validate_config(payload: dict[str, object]) -> list[dict[str, object]]:
                         "devices": list(devices),
                         "message": (
                             f"пересечение OWEN адреса {addr} на линии {bus_name}: "
-                            f"используется устройствами {devices}"
+                            f"используется разными устройствами {devices}"
                         ),
                     })
 
@@ -514,9 +640,17 @@ def render_device_details(
     tag: str | None = None,
 ) -> str:
     bus_name = _resolve_bus_name(payload, line)
-    grouped = get_line_devices(payload, line)
+    devices = get_line_devices(payload, line)
+
+    # Проверяем, есть ли устройства на линии
+    if not devices:
+        raise ValueError(
+            f"на линии {bus_name} не настроено ни одного устройства. "
+            f"Добавьте устройство командой 'add-trm138'."
+        )
+
     selected = _select_collected_device(
-        grouped,
+        devices,
         device=device,
         base_address=base_address,
         tag=tag,
@@ -1139,18 +1273,41 @@ def _select_collected_device(
 ) -> dict[str, object]:
     normalized_tag = _slugify(tag) if tag is not None else None
     selected: dict[str, object] | None = None
+    matching_devices = []
+
     for item in devices:
         if device is not None and int(item["device"]) != device:
             continue
         if base_address is not None and int(item["base_address"]) != base_address:
             continue
-        if normalized_tag is not None and str(item["tag"]) != normalized_tag:
+        if normalized_tag is not None and str(item.get("tag", "")) != normalized_tag:
             continue
+        matching_devices.append(item)
         if selected is not None:
-            raise ValueError("device selector is ambiguous")
+            raise ValueError(
+                f"найдено несколько устройств, удовлетворяющих критерию поиска. "
+                f"Уточните параметры поиска (номер устройства или базовый адрес)."
+            )
         selected = item
+
     if selected is None:
-        raise ValueError("device not found")
+        # Формируем понятное сообщение об ошибке
+        available = [f"устройство {d['device']} (базовый адрес {d['base_address']})" for d in devices]
+        if not available:
+            raise ValueError("устройства не найдены")
+        available_str = ", ".join(available)
+        if device is not None:
+            raise ValueError(
+                f"устройство с номером {device} не найдено. "
+                f"Доступные: {available_str}"
+            )
+        if base_address is not None:
+            raise ValueError(
+                f"устройство с базовым адресом {base_address} не найдено. "
+                f"Доступные: {available_str}"
+            )
+        raise ValueError(f"устройство не найдено. Доступные: {available_str}")
+
     return selected
 
 
