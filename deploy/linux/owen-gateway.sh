@@ -303,6 +303,46 @@ line_toggle() {
     esac
 }
 
+# Редактировать параметры линии
+line_edit() {
+    echo -e "\n${BLUE}--- Редактирование параметров линии ---${NC}"
+    check_config || return 1
+
+    read -p "Номер линии [1]: " line
+    line="${line:-1}"
+
+    echo "Введите новые значения (оставьте пустым чтобы не менять):"
+
+    read -p "Порт (например /dev/ttyUSB0): " port
+    read -p "Скорость (9600/19200/38400/57600/115200): " baudrate
+    read -p "Биты данных (7/8) [8]: " bytesize
+    read -p "Четность (N/E/O) [N]: " parity
+    read -p "Стоп-биты (1/2) [1]: " stopbits
+    read -p "Таймаут мс [1000]: " timeout_ms
+    read -p "Интервал опроса мс [1000]: " poll_interval_ms
+
+    # Формируем команду
+    local cmd="PYTHONPATH=\"${APP_DIR}\" \"${VENV_BIN}/python\" -m owen_gateway config set-line --config \"${CONFIG_FILE}\" --line \"${line}\""
+
+    [[ -n "$port" ]] && cmd="$cmd --port \"$port\""
+    [[ -n "$baudrate" ]] && cmd="$cmd --baudrate \"$baudrate\""
+    [[ -n "$bytesize" ]] && cmd="$cmd --bytesize \"$bytesize\""
+    [[ -n "$parity" ]] && cmd="$cmd --parity \"$parity\""
+    [[ -n "$stopbits" ]] && cmd="$cmd --stopbits \"$stopbits\""
+    [[ -n "$timeout_ms" ]] && cmd="$cmd --timeout-ms \"$timeout_ms\""
+    [[ -n "$poll_interval_ms" ]] && cmd="$cmd --poll-interval-ms \"$poll_interval_ms\""
+
+    echo -e "\n${YELLOW}Применение изменений...${NC}"
+    eval "$cmd"
+
+    if [[ $? -eq 0 ]]; then
+        print_status "OK" "Параметры линии обновлены"
+        echo "Не забудьте перезапустить службу: sudo systemctl restart owen-gateway"
+    else
+        print_status "ERROR" "Ошибка при обновлении параметров"
+    fi
+}
+
 #===============================================================================
 # НОВЫЕ ФУНКЦИИ УПРАВЛЕНИЯ КАНАЛАМИ
 #===============================================================================
@@ -563,16 +603,16 @@ config_menu() {
         read -p "Выберите вариант: " option
 
         case "$option" in
-            1) config_summary ;;
+            1) config_summary; echo ""; read -p "Нажмите Enter..." dummy ;;
             2)
                 read -p "Номер линии [1]: " line
                 line="${line:-1}"
                 config_list_line "$line"
-                ;;
-            3) config_show_trm138 ;;
-            4) config_add_trm138 ;;
-            5) config_remove_trm138 ;;
-            6) config_modbus_map ;;
+                echo ""; read -p "Нажмите Enter..." dummy ;;
+            3) config_show_trm138; echo ""; read -p "Нажмите Enter..." dummy ;;
+            4) config_add_trm138; echo ""; read -p "Нажмите Enter..." dummy ;;
+            5) config_remove_trm138; echo ""; read -p "Нажмите Enter..." dummy ;;
+            6) config_modbus_map; echo ""; read -p "Нажмите Enter..." dummy ;;
             0) break ;;
             *) print_status "ERROR" "Неверный вариант" ;;
         esac
@@ -596,9 +636,9 @@ channel_menu() {
         read -p "Выберите вариант: " option
 
         case "$option" in
-            1) config_channel_status ;;
-            2) config_enable_channel ;;
-            3) config_disable_channel ;;
+            1) config_channel_status; echo ""; read -p "Нажмите Enter..." dummy ;;
+            2) config_enable_channel; echo ""; read -p "Нажмите Enter..." dummy ;;
+            3) config_disable_channel; echo ""; read -p "Нажмите Enter..." dummy ;;
             0) break ;;
             *) print_status "ERROR" "Неверный вариант" ;;
         esac
@@ -617,8 +657,8 @@ validate_menu() {
         read -p "Выберите вариант: " option
 
         case "$option" in
-            1) config_validate ;;
-            2) config_modbus_map ;;
+            1) config_validate; echo ""; read -p "Нажмите Enter..." dummy ;;
+            2) config_modbus_map; echo ""; read -p "Нажмите Enter..." dummy ;;
             0) break ;;
             *) print_status "ERROR" "Неверный вариант" ;;
         esac
@@ -632,15 +672,17 @@ line_menu() {
         echo "  1. Список линий"
         echo "  2. Показать параметры линии"
         echo "  3. Включить/выключить линию"
+        echo "  4. Редактировать параметры линии"
         echo ""
         echo "  0. Назад в главное меню"
         echo ""
         read -p "Выберите вариант: " option
 
         case "$option" in
-            1) line_list ;;
-            2) line_show ;;
-            3) line_toggle ;;
+            1) line_list; echo ""; read -p "Нажмите Enter..." dummy ;;
+            2) line_show; echo ""; read -p "Нажмите Enter..." dummy ;;
+            3) line_toggle; echo ""; read -p "Нажмите Enter..." dummy ;;
+            4) line_edit; echo ""; read -p "Нажмите Enter..." dummy ;;
             0) break ;;
             *) print_status "ERROR" "Неверный вариант" ;;
         esac
@@ -660,12 +702,12 @@ logs_menu() {
         read -p "Выберите вариант: " option
 
         case "$option" in
-            1) service_logs ;;
-            2) service_logs_error ;;
+            1) service_logs; echo ""; read -p "Нажмите Enter..." dummy ;;
+            2) service_logs_error; echo ""; read -p "Нажмите Enter..." dummy ;;
             3)
                 echo -e "\n${YELLOW}Для выхода нажмите Ctrl+C${NC}"
                 ${SUDO} journalctl -u "${SERVICE_NAME}.service" -f --no-pager
-                ;;
+                echo ""; read -p "Нажмите Enter..." dummy ;;
             0) break ;;
             *) print_status "ERROR" "Неверный вариант" ;;
         esac

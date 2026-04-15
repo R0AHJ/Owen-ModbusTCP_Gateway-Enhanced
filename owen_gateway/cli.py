@@ -194,6 +194,23 @@ def build_config_parser() -> argparse.ArgumentParser:
     line_disable_parser.add_argument("--config", default="owen_config.json", help="path to config json")
     line_disable_parser.add_argument("--line", type=int, required=True, help="номер линии 1..2")
 
+    # Редактирование параметров линии
+    edit_line_parser = subparsers.add_parser(
+        "set-line",
+        help="изменить параметры линии",
+    )
+    edit_line_parser.add_argument("--config", default="owen_config.json", help="path to config json")
+    edit_line_parser.add_argument("--line", type=int, required=True, help="номер линии 1..2")
+    edit_line_parser.add_argument("--port", help="serial port, for example COM6")
+    edit_line_parser.add_argument("--baudrate", type=int, help="serial baudrate")
+    edit_line_parser.add_argument("--bytesize", type=int, choices=[7, 8], help="serial bytesize")
+    edit_line_parser.add_argument("--parity", choices=["N", "E", "O"], help="serial parity")
+    edit_line_parser.add_argument("--stopbits", type=int, choices=[1, 2], help="serial stop bits")
+    edit_line_parser.add_argument("--timeout-ms", type=int, help="serial timeout in ms")
+    edit_line_parser.add_argument("--poll-interval-ms", type=int, help="poll interval in ms")
+    edit_line_parser.add_argument("--address-bits", type=int, choices=[8, 11], help="OVEN address width")
+    edit_line_parser.add_argument("--slave-base", type=int, help="starting SlaveID for this line")
+
     return parser
 
 
@@ -456,6 +473,49 @@ def _run_config_tool(argv: list[str]) -> int:
         save_config_document(args.config, payload)
         print(f"Линия {result['bus']} выключена")
         print(f"Порт: {result['port']}")
+        return 0
+
+    if args.config_command == "set-line":
+        # Редактирование параметров линии
+        # Получаем текущие параметры
+        bus_name = f"line{args.line}"
+        buses = payload.get("buses", [])
+        current_bus = None
+        for bus in buses:
+            if bus.get("name") == bus_name:
+                current_bus = bus
+                break
+
+        if current_bus is None:
+            print(f"Линия {bus_name} не найдена. Сначала создайте её.")
+            return 1
+
+        # Применяем только указанные параметры
+        serial = current_bus.get("serial", {})
+        if args.port is not None:
+            serial["port"] = args.port
+        if args.baudrate is not None:
+            serial["baudrate"] = args.baudrate
+        if args.bytesize is not None:
+            serial["bytesize"] = args.bytesize
+        if args.parity is not None:
+            serial["parity"] = args.parity
+        if args.stopbits is not None:
+            serial["stopbits"] = args.stopbits
+        if args.timeout_ms is not None:
+            serial["timeout_ms"] = args.timeout_ms
+        if args.address_bits is not None:
+            serial["address_bits"] = args.address_bits
+        if args.poll_interval_ms is not None:
+            current_bus["poll_interval_ms"] = args.poll_interval_ms
+        if args.slave_base is not None:
+            current_bus["modbus_slave_base"] = args.slave_base
+
+        save_config_document(args.config, payload)
+        map_path = write_generated_modbus_map(args.config, payload)
+        print(f"Линия {bus_name} обновлена")
+        print(f"Порт: {serial.get('port')}, Скорость: {serial.get('baudrate')}")
+        print(f"Карта сохранена: {map_path}")
         return 0
 
     parser.error(f"unsupported config command: {args.config_command}")
